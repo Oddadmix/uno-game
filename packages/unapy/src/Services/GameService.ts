@@ -1,846 +1,852 @@
-import CardService from "@/Services/CardService"
-import SocketService from "@/Services/SocketService"
-import PlayerService from "@/Services/PlayerService"
-import GameRoundService from "@/Services/GameRoundService"
-import ClientService from "@/Services/ClientService"
+import CardService from '@/Services/CardService';
+import SocketService from '@/Services/SocketService';
+import PlayerService from '@/Services/PlayerService';
+import GameRoundService from '@/Services/GameRoundService';
+import ClientService from '@/Services/ClientService';
 
-import NumberUtil from "@/Utils/NumberUtil"
-import ArrayUtil from "@/Utils/ArrayUtil"
+import NumberUtil from '@/Utils/NumberUtil';
+import ArrayUtil from '@/Utils/ArrayUtil';
 
-import environmentConfig from "@/Config/environment"
+import environmentConfig from '@/Config/environment';
 
 import {
-	Game,
-	GameEvents,
-	PlayerData,
-	CurrentPlayerInfo,
-	CurrentPlayerGameStatus,
-	CardData,
-	CardColors,
-	PlayerStatus,
-	PlayerJoinedEventData,
-	PlayerLeftEventData,
-	PlayerWonEventData,
-	PlayerBuyCardsEventData,
-	PlayerUnoEventData,
-	PlayerBlockedEventData,
-	GameEndedEventData,
-	GameStartedEventData,
-	PlayerToggledReadyEventData,
-	PlayerPutCardEventData,
-	PlayerChoseCardColorEventData,
-	GameRoundRemainingTimeChangedEventData,
-	PlayerBoughtCardEventData,
-	PlayerCardUsabilityConsolidatedEventData,
-	GameAmountToBuyChangedEventData,
-	PlayerStatusChangedEventData,
-} from "@uno-game/protocols"
+  Game,
+  GameEvents,
+  PlayerData,
+  CurrentPlayerInfo,
+  CurrentPlayerGameStatus,
+  CardData,
+  CardColors,
+  PlayerStatus,
+  PlayerJoinedEventData,
+  PlayerLeftEventData,
+  PlayerWonEventData,
+  PlayerBuyCardsEventData,
+  PlayerUnoEventData,
+  PlayerBlockedEventData,
+  GameEndedEventData,
+  GameStartedEventData,
+  PlayerToggledReadyEventData,
+  PlayerPutCardEventData,
+  PlayerChoseCardColorEventData,
+  GameRoundRemainingTimeChangedEventData,
+  PlayerBoughtCardEventData,
+  PlayerCardUsabilityConsolidatedEventData,
+  GameAmountToBuyChangedEventData,
+  PlayerStatusChangedEventData,
+} from '@uno-game/protocols';
 
-import GameRepository from "@/Repositories/GameRepository"
+import GameRepository from '@/Repositories/GameRepository';
 
-import CryptUtil from "@/Utils/CryptUtil"
+import CryptUtil from '@/Utils/CryptUtil';
 
 class GameService {
-	async setupGame (playerId: string, chatId: string): Promise<Game> {
-		const cards = await CardService.setupRandomCards()
-
-		const playerData = await PlayerService.getPlayerData(playerId)
-
-		const game: Game = {
-			maxPlayers: 8,
-			type: "public",
-			status: "waiting",
-			round: 0,
-			id: CryptUtil.makeShortUUID(),
-			chatId,
-			currentPlayerIndex: 0,
-			nextPlayerIndex: 1,
-			currentGameColor: null,
-			title: playerData.name,
-			availableCards: [],
-			usedCards: [],
-			players: [],
-			cards,
-			direction: "clockwise",
-			currentCardCombo: {
-				cardTypes: [],
-				amountToBuy: 0,
-			},
-			maxRoundDurationInSeconds: environmentConfig.isDev ? 100 : 30,
-			createdAt: Date.now(),
-		}
+  async setupGame(playerId: string, chatId: string): Promise<Game> {
+    const cards = await CardService.setupRandomCards();
+
+    const playerData = await PlayerService.getPlayerData(playerId);
+
+    const game: Game = {
+      maxPlayers: 8,
+      type: 'public',
+      status: 'waiting',
+      round: 0,
+      id: CryptUtil.makeShortUUID(),
+      chatId,
+      currentPlayerIndex: 0,
+      nextPlayerIndex: 1,
+      currentGameColor: null,
+      title: playerData.name,
+      availableCards: [],
+      usedCards: [],
+      players: [],
+      cards,
+      direction: 'clockwise',
+      currentCardCombo: {
+        cardTypes: [],
+        amountToBuy: 0,
+      },
+      maxRoundDurationInSeconds: environmentConfig.isDev ? 100 : 30,
+      createdAt: Date.now(),
+    };
+
+    await this.setGameData(game.id, game);
+
+    return game;
+  }
+
+  async getExistingPlayerGame(playerId: string): Promise<Game> {
+    const player = await PlayerService.getPlayerData(playerId);
+    const games = await this.getGameList();
+
+    const game = games.filter(({ status }) => status === 'waiting').find(({ title }) => title === player.name);
 
-		await this.setGameData(game.id, game)
+    return game;
+  }
 
-		return game
-	}
+  async getChatIdByGameId(gameId: string): Promise<string> {
+    const game = await GameRepository.getGame(gameId);
 
-	async getExistingPlayerGame (playerId: string): Promise<Game> {
-		const player = await PlayerService.getPlayerData(playerId)
-		const games = await this.getGameList()
+    return game?.chatId;
+  }
 
-		const game = games
-			.filter(({ status }) => status === "waiting")
-			.find(({ title }) => title === player.name)
+  async gameExists(gameId: string): Promise<boolean> {
+    const game = await GameRepository.getGame(gameId);
 
-		return game
-	}
+    if (game) {
+      return true;
+    } else {
+      return false;
+    }
+  }
 
-	async getChatIdByGameId (gameId: string): Promise<string> {
-		const game = await GameRepository.getGame(gameId)
+  async joinGame(gameId: string, playerId: string): Promise<Game> {
+    const game = await this.getGame(gameId);
 
-		return game?.chatId
-	}
+    const player = game?.players?.find((player) => player.id === playerId);
 
-	async gameExists (gameId: string): Promise<boolean> {
-		const game = await GameRepository.getGame(gameId)
+    const gameHasNotStarted = game.status === 'waiting';
+    const gameIsNotFull = game.players.length < game.maxPlayers;
+    const playerIsNotOnGame = !player;
 
-		if (game) {
-			return true
-		} else {
-			return false
-		}
-	}
+    if (gameHasNotStarted && gameIsNotFull && playerIsNotOnGame) {
+      const playerData = await PlayerService.getPlayerData(playerId);
 
-	async joinGame (gameId: string, playerId: string): Promise<Game> {
-		const game = await this.getGame(gameId)
+      const player: PlayerData = {
+        id: playerId,
+        name: playerData.name,
+        handCards: [],
+        status: 'online',
+        ready: false,
+        isCurrentRoundPlayer: false,
+        canBuyCard: false,
+      };
 
-		const player = game?.players?.find(player => player.id === playerId)
+      game.players.push(player);
 
-		const gameHasNotStarted = game.status === "waiting"
-		const gameIsNotFull = game.players.length < game.maxPlayers
-		const playerIsNotOnGame = !player
+      this.emitGameEvent<PlayerJoinedEventData>(game.id, 'PlayerJoined', { player });
+    }
 
-		if (gameHasNotStarted && gameIsNotFull && playerIsNotOnGame) {
-			const playerData = await PlayerService.getPlayerData(playerId)
+    const gameRoundRemainingTimeInSeconds = await this.getRoundRemainingTimeInSeconds(gameId);
 
-			const player: PlayerData = {
-				id: playerId,
-				name: playerData.name,
-				handCards: [],
-				status: "online",
-				ready: false,
-				isCurrentRoundPlayer: false,
-				canBuyCard: false,
-			}
+    GameRoundService.emitGameRoundEvent<GameRoundRemainingTimeChangedEventData>(
+      gameId,
+      'GameRoundRemainingTimeChanged',
+      {
+        roundRemainingTimeInSeconds: gameRoundRemainingTimeInSeconds,
+      },
+    );
 
-			game.players.push(player)
+    if (!playerIsNotOnGame) {
+      game.players = await this.buildPlayersWithChangedPlayerStatus(game, playerId, 'online');
+    }
 
-			this.emitGameEvent<PlayerJoinedEventData>(game.id, "PlayerJoined", { player })
-		}
+    await this.setGameData(gameId, game);
 
-		const gameRoundRemainingTimeInSeconds = await this.getRoundRemainingTimeInSeconds(gameId)
+    return game;
+  }
 
-		GameRoundService.emitGameRoundEvent<GameRoundRemainingTimeChangedEventData>(gameId, "GameRoundRemainingTimeChanged", {
-			roundRemainingTimeInSeconds: gameRoundRemainingTimeInSeconds,
-		})
+  async purgePlayer(playerId: string): Promise<Game[]> {
+    const games = await this.getGameList();
 
-		if (!playerIsNotOnGame) {
-			game.players = await this.buildPlayersWithChangedPlayerStatus(game, playerId, "online")
-		}
+    const purgedGames: Game[] = [];
 
-		await this.setGameData(gameId, game)
+    await Promise.all(
+      games.map(async (game) => {
+        const isPlayerOnGame = game?.players?.find((player) => player?.id === playerId);
 
-		return game
-	}
+        if (isPlayerOnGame) {
+          await this.disconnectPlayer(game?.id, playerId);
 
-	async purgePlayer (playerId: string): Promise<Game[]> {
-		const games = await this.getGameList()
+          this.emitGameEvent<PlayerLeftEventData>(game?.id, 'PlayerLeft', { playerId });
 
-		const purgedGames: Game[] = []
+          purgedGames.push(game);
+        }
+      }),
+    );
 
-		await Promise.all(
-			games.map(async game => {
-				const isPlayerOnGame = game?.players?.find(player => player?.id === playerId)
+    return purgedGames;
+  }
 
-				if (isPlayerOnGame) {
-					await this.disconnectPlayer(game?.id, playerId)
+  async toggleReady(playerId: string, gameId: string): Promise<void> {
+    const game = await this.getGame(gameId);
 
-					this.emitGameEvent<PlayerLeftEventData>(game?.id, "PlayerLeft", { playerId })
+    const updatedPlayer = game?.players?.find(({ id }) => id === playerId);
 
-					purgedGames.push(game)
-				}
-			}),
-		)
+    updatedPlayer.ready = !updatedPlayer.ready;
 
-		return purgedGames
-	}
+    this.emitGameEvent<PlayerToggledReadyEventData>(gameId, 'PlayerToggledReady', {
+      playerId,
+      ready: updatedPlayer.ready,
+    });
 
-	async toggleReady (playerId: string, gameId: string): Promise<void> {
-		const game = await this.getGame(gameId)
+    await this.setGameData(gameId, game);
 
-		const updatedPlayer = game?.players?.find(({ id }) => id === playerId)
+    const areAllPlayersReady = game?.players?.every((player) => player.ready);
 
-		updatedPlayer.ready = !updatedPlayer.ready
+    if (areAllPlayersReady) {
+      await this.startGame(gameId);
+    }
+  }
 
-		this.emitGameEvent<PlayerToggledReadyEventData>(gameId, "PlayerToggledReady", {
-			playerId,
-			ready: updatedPlayer.ready,
-		})
+  async getGameList(): Promise<Game[]> {
+    return await GameRepository.getGameList();
+  }
 
-		await this.setGameData(gameId, game)
+  async buyCard(playerId: string, gameId: string): Promise<void> {
+    const game = await this.getGame(gameId);
 
-		const areAllPlayersReady = game?.players?.every(player => player.ready)
+    const currentPlayerInfo = await this.getCurrentPlayerInfo(game);
 
-		if (areAllPlayersReady) {
-			await this.startGame(gameId)
-		}
-	}
+    if (currentPlayerInfo.id !== playerId) {
+      return;
+    }
 
-	async getGameList (): Promise<Game[]> {
-		return await GameRepository.getGameList()
-	}
+    const player = game?.players?.find((player) => player.id === currentPlayerInfo.id);
 
-	async buyCard (playerId: string, gameId: string): Promise<void> {
-		const game = await this.getGame(gameId)
+    const needToBuyCard = player?.handCards?.every((card) => !card.canBeUsed);
 
-		const currentPlayerInfo = await this.getCurrentPlayerInfo(game)
+    if (!needToBuyCard) {
+      return;
+    }
 
-		if (currentPlayerInfo.id !== playerId) {
-			return
-		}
+    const available = [...game?.availableCards];
 
-		const player = game?.players?.find(player => player.id === currentPlayerInfo.id)
+    const card = available.shift();
 
-		const needToBuyCard = player?.handCards?.every(card => !card.canBeUsed)
+    this.emitGameEvent<PlayerBoughtCardEventData>(game.id, 'PlayerBoughtCard', {
+      playerId: playerId,
+      cards: [card],
+    });
 
-		if (!needToBuyCard) {
-			return
-		}
+    game.players = game?.players?.map((player) => {
+      if (player.id === playerId) {
+        return {
+          ...player,
+          handCards: [card, ...player?.handCards],
+        };
+      } else {
+        return player;
+      }
+    });
 
-		const available = [...game?.availableCards]
+    game.availableCards = available;
 
-		const card = available.shift()
+    game.players = await this.buildPlayersWithCardUsability(currentPlayerInfo.id, game);
 
-		this.emitGameEvent<PlayerBoughtCardEventData>(game.id, "PlayerBoughtCard", {
-			playerId: playerId,
-			cards: [card],
-		})
+    await this.setGameData(gameId, game);
+  }
 
-		game.players = game?.players?.map(player => {
-			if (player.id === playerId) {
-				return {
-					...player,
-					handCards: [card, ...player?.handCards],
-				}
-			} else {
-				return player
-			}
-		})
+  async putCard(playerId: string, cardIds: string[], gameId: string, selectedColor: CardColors): Promise<void> {
+    let game = await this.getGame(gameId);
 
-		game.availableCards = available
+    const currentPlayerInfo = await this.getCurrentPlayerInfo(game);
 
-		game.players = await this.buildPlayersWithCardUsability(currentPlayerInfo.id, game)
+    if (currentPlayerInfo.id !== playerId) {
+      return;
+    }
 
-		await this.setGameData(gameId, game)
-	}
+    const player = game?.players?.find((player) => player.id === playerId);
 
-	async putCard (playerId: string, cardIds: string[], gameId: string, selectedColor: CardColors): Promise<void> {
-		let game = await this.getGame(gameId)
+    const cards: CardData[] = [];
 
-		const currentPlayerInfo = await this.getCurrentPlayerInfo(game)
+    cardIds.forEach((cardId) => {
+      const card = player?.handCards?.find((card) => card.id === cardId);
 
-		if (currentPlayerInfo.id !== playerId) {
-			return
-		}
+      cards.push(card);
+    });
 
-		const player = game?.players?.find(player => player.id === playerId)
+    this.emitGameEvent<PlayerPutCardEventData>(game.id, 'PlayerPutCard', { playerId, cards });
 
-		const cards: CardData[] = []
+    game.players = game?.players?.map((player) => {
+      if (player.id === playerId) {
+        return {
+          ...player,
+          handCards: player?.handCards?.filter((card) => !cardIds.includes(card.id)),
+        };
+      } else {
+        return player;
+      }
+    });
 
-		cardIds.forEach(cardId => {
-			const card = player?.handCards?.find(card => card.id === cardId)
+    /**
+     * We keep flowing the used cards back to stack, in order to help
+     * keeping the game up till someone wins it.
+     */
+    const usedCards = [...cards, ...game?.usedCards];
 
-			cards.push(card)
-		})
+    const inStackCards = usedCards.slice(0, 10).filter((card) => card);
+    let outStackCards = usedCards.slice(10, usedCards.length).filter((card) => card);
 
-		this.emitGameEvent<PlayerPutCardEventData>(game.id, "PlayerPutCard", { playerId, cards })
+    outStackCards = outStackCards.map((card) => {
+      return card;
+    });
 
-		game.players = game?.players?.map(player => {
-			if (player.id === playerId) {
-				return {
-					...player,
-					handCards: player?.handCards?.filter(card => !cardIds.includes(card.id)),
-				}
-			} else {
-				return player
-			}
-		})
+    ArrayUtil.shuffle(outStackCards);
 
-		/**
-		 * We keep flowing the used cards back to stack, in order to help
-		 * keeping the game up till someone wins it.
-		 */
-		const usedCards = [...cards, ...game?.usedCards]
+    game.usedCards = inStackCards;
+    game.availableCards = [...game.availableCards, ...outStackCards];
 
-		const inStackCards = usedCards.slice(0, 10).filter(card => card)
-		let outStackCards = usedCards.slice(10, usedCards.length).filter(card => card)
+    game.currentGameColor = cards[0]?.color;
 
-		outStackCards = outStackCards.map(card => {
-			if (card.color === "black") {
-				return {
-					...card,
-					selectedColor: null,
-					src: card.possibleColors.black,
-				}
-			} else {
-				return card
-			}
-		})
+    game = await this.buildGameWithCardEffect(game, cards, selectedColor);
 
-		ArrayUtil.shuffle(outStackCards)
+    await this.setGameData(gameId, game);
 
-		game.usedCards = inStackCards
-		game.availableCards = [
-			...game.availableCards,
-			...outStackCards,
-		]
+    await this.nextRound(gameId);
+  }
 
-		game.currentGameColor = cards[0]?.color
+  async changePlayerStatus(gameId: string, playerId: string, playerStatus: PlayerStatus): Promise<void> {
+    const game = await this.getGame(gameId);
 
-		game = await this.buildGameWithCardEffect(game, cards, selectedColor)
+    game.players = await this.buildPlayersWithChangedPlayerStatus(game, playerId, playerStatus);
 
-		await this.setGameData(gameId, game)
+    await this.setGameData(gameId, game);
+  }
 
-		await this.nextRound(gameId)
-	}
+  emitGameEvent<Data extends unknown>(gameId: string, event: GameEvents, data: Data) {
+    SocketService.emitRoomEvent('game', gameId, event, data);
 
-	async changePlayerStatus (gameId: string, playerId: string, playerStatus: PlayerStatus): Promise<void> {
-		const game = await this.getGame(gameId)
+    const gameUpdateEvents: GameEvents[] = ['GameStarted', 'GameCreated', 'GameEnded', 'PlayerJoined', 'PlayerLeft'];
 
-		game.players = await this.buildPlayersWithChangedPlayerStatus(game, playerId, playerStatus)
+    const isGameUpdateEvent = gameUpdateEvents.some((gameEvent) => gameEvent === event);
 
-		await this.setGameData(gameId, game)
-	}
+    if (isGameUpdateEvent) {
+      ClientService.dispatchGameHistoryConsolidated();
+      ClientService.dispatchGameListUpdated();
+    }
+  }
 
-	emitGameEvent<Data extends unknown> (gameId: string, event: GameEvents, data: Data) {
-		SocketService.emitRoomEvent("game", gameId, event, data)
+  private async makeComputedPlay(gameId: string, playerId: string): Promise<void> {
+    const game = await this.getGame(gameId);
 
-		const gameUpdateEvents: GameEvents[] = [
-			"GameStarted",
-			"GameCreated",
-			"GameEnded",
-			"PlayerJoined",
-			"PlayerLeft",
-		]
+    const player = game.players.find((playerItem) => playerItem.id === playerId);
 
-		const isGameUpdateEvent = gameUpdateEvents.some(gameEvent => gameEvent === event)
+    if (player.status === 'online') {
+      return;
+    }
 
-		if (isGameUpdateEvent) {
-			ClientService.dispatchGameHistoryConsolidated()
-			ClientService.dispatchGameListUpdated()
-		}
-	}
+    const { handCards } = player;
 
-	private async makeComputedPlay (gameId: string, playerId: string): Promise<void> {
-		const game = await this.getGame(gameId)
+    const usableCard = handCards.find((card) => card.canBeUsed);
 
-		const player = game.players.find(playerItem => playerItem.id === playerId)
+    if (!usableCard) {
+      await this.buyCard(playerId, gameId);
 
-		if (player.status === "online") {
-			return
-		}
+      return await this.makeComputedPlay(gameId, playerId);
+    }
 
-		const { handCards } = player
+    const randomCardColor = await CardService.retrieveRandomCardColor();
 
-		const usableCard = handCards.find(card => card.canBeUsed)
+    await this.putCard(playerId, [usableCard.id], gameId, randomCardColor);
+  }
 
-		if (!usableCard) {
-			await this.buyCard(playerId, gameId)
+  private async getRoundRemainingTimeInSeconds(gameId: string): Promise<number> {
+    const remainingTimeInSeconds = await GameRoundService.getRoundRemainingTimeInSeconds(gameId);
 
-			return await this.makeComputedPlay(gameId, playerId)
-		}
+    return remainingTimeInSeconds;
+  }
 
-		const randomCardColor = await CardService.retrieveRandomCardColor()
+  async resetRoundCounter(gameId: string): Promise<void> {
+    const { maxRoundDurationInSeconds } = await this.getGame(gameId);
 
-		await this.putCard(playerId, [usableCard.id], gameId, randomCardColor)
-	}
+    const gameRoundRemainingTime = await this.getRoundRemainingTimeInSeconds(gameId);
 
-	private async getRoundRemainingTimeInSeconds (gameId: string): Promise<number> {
-		const remainingTimeInSeconds = await GameRoundService.getRoundRemainingTimeInSeconds(gameId)
+    GameRoundService.emitGameRoundEvent<GameRoundRemainingTimeChangedEventData>(
+      gameId,
+      'GameRoundRemainingTimeChanged',
+      {
+        roundRemainingTimeInSeconds: gameRoundRemainingTime,
+      },
+    );
 
-		return remainingTimeInSeconds
-	}
+    await GameRoundService.resetRoundCounter(gameId, {
+      timeoutAction: async (gameId) => {
+        const game = await this.getGame(gameId);
 
-	async resetRoundCounter (gameId: string): Promise<void> {
-		const { maxRoundDurationInSeconds } = await this.getGame(gameId)
+        const currentPlayerInfo = await this.getCurrentPlayerInfo(game);
 
-		const gameRoundRemainingTime = await this.getRoundRemainingTimeInSeconds(gameId)
+        game.players = await this.buildPlayersWithChangedPlayerStatus(game, currentPlayerInfo.id, 'afk');
 
-		GameRoundService.emitGameRoundEvent<GameRoundRemainingTimeChangedEventData>(gameId, "GameRoundRemainingTimeChanged", {
-			roundRemainingTimeInSeconds: gameRoundRemainingTime,
-		})
+        await this.setGameData(gameId, game);
 
-		await GameRoundService.resetRoundCounter(gameId, {
-			timeoutAction: async (gameId) => {
-				const game = await this.getGame(gameId)
+        await this.makeComputedPlay(gameId, currentPlayerInfo.id);
+      },
+      intervalAction: async (gameId) => {
+        const gameRoundRemainingTime = await this.getRoundRemainingTimeInSeconds(gameId);
 
-				const currentPlayerInfo = await this.getCurrentPlayerInfo(game)
+        GameRoundService.emitGameRoundEvent<GameRoundRemainingTimeChangedEventData>(
+          gameId,
+          'GameRoundRemainingTimeChanged',
+          {
+            roundRemainingTimeInSeconds: gameRoundRemainingTime,
+          },
+        );
+      },
+      gameId,
+      timeInSeconds: maxRoundDurationInSeconds,
+    });
+  }
 
-				game.players = await this.buildPlayersWithChangedPlayerStatus(game, currentPlayerInfo.id, "afk")
+  private async removeRoundCounter(gameId: string): Promise<void> {
+    await GameRoundService.removeRoundCounter(gameId);
+  }
 
-				await this.setGameData(gameId, game)
+  private async buildPlayersWithChangedPlayerStatus(
+    game: Game,
+    playerId: string,
+    status: PlayerStatus,
+  ): Promise<PlayerData[]> {
+    const updatedPlayer = game.players.find(({ id }) => id === playerId);
 
-				await this.makeComputedPlay(gameId, currentPlayerInfo.id)
-			},
-			intervalAction: async (gameId) => {
-				const gameRoundRemainingTime = await this.getRoundRemainingTimeInSeconds(gameId)
+    updatedPlayer.status = status;
 
-				GameRoundService.emitGameRoundEvent<GameRoundRemainingTimeChangedEventData>(gameId, "GameRoundRemainingTimeChanged", {
-					roundRemainingTimeInSeconds: gameRoundRemainingTime,
-				})
-			},
-			gameId,
-			timeInSeconds: maxRoundDurationInSeconds,
-		})
-	}
+    const playersWithChangedPlayerStatus = game.players.map((player) => {
+      if (player.id === playerId) {
+        return updatedPlayer;
+      }
 
-	private async removeRoundCounter (gameId: string): Promise<void> {
-		await GameRoundService.removeRoundCounter(gameId)
-	}
+      return player;
+    });
 
-	private async buildPlayersWithChangedPlayerStatus (game: Game, playerId: string, status: PlayerStatus): Promise<PlayerData[]> {
-		const updatedPlayer = game.players.find(({ id }) => id === playerId)
+    this.emitGameEvent<PlayerStatusChangedEventData>(game.id, 'PlayerStatusChanged', {
+      playerId: updatedPlayer.id,
+      status: updatedPlayer.status,
+    });
 
-		updatedPlayer.status = status
+    return playersWithChangedPlayerStatus;
+  }
 
-		const playersWithChangedPlayerStatus = game.players.map(player => {
-			if (player.id === playerId) {
-				return updatedPlayer
-			}
+  private async startGame(gameId: string): Promise<void> {
+    const game = await this.getGame(gameId);
 
-			return player
-		})
+    const allCards = [...game?.cards];
 
-		this.emitGameEvent<PlayerStatusChangedEventData>(game.id, "PlayerStatusChanged", {
-			playerId: updatedPlayer.id,
-			status: updatedPlayer.status,
-		})
+    const currentPlayer = await this.getCurrentPlayerInfo(game);
 
-		return playersWithChangedPlayerStatus
-	}
+    game.status = 'playing';
 
-	private async startGame (gameId: string): Promise<void> {
-		const game = await this.getGame(gameId)
+    game.players = game?.players.map((player) => {
+      const handCards: CardData[] = [];
 
-		const allCards = [...game?.cards]
+      for (let i = 0; i < 4; i++) {
+        const selectedCard = allCards.shift();
+        selectedCard.show = false;
+        if (i === 0 || i === 1) selectedCard.show = true;
 
-		const currentPlayer = await this.getCurrentPlayerInfo(game)
+        handCards.push(selectedCard);
+      }
 
-		game.status = "playing"
+      return {
+        ...player,
+        isCurrentRoundPlayer: player.id === currentPlayer.id,
+        handCards: handCards.map((handCard) => ({
+          ...handCard,
+          canBeUsed: player.id === currentPlayer.id,
+        })),
+        canBuyCard: false,
+      };
+    });
 
-		game.players = game?.players.map(player => {
-			const handCards: CardData[] = []
+    game.availableCards = allCards;
 
-			for (let i = 0; i < 7; i++) {
-				const selectedCard = allCards.shift()
-				handCards.push(selectedCard)
-			}
+    await this.setGameData(gameId, game);
 
-			return {
-				...player,
-				isCurrentRoundPlayer: player.id === currentPlayer.id,
-				handCards: handCards.map(handCard => ({
-					...handCard,
-					canBeUsed: player.id === currentPlayer.id,
-				})),
-				canBuyCard: false,
-			}
-		})
+    this.emitGameEvent<GameStartedEventData>(gameId, 'GameStarted', { game });
 
-		game.availableCards = allCards
+    await this.resetRoundCounter(gameId);
+  }
 
-		await this.setGameData(gameId, game)
+  private async addPlayer(gameId: string, playerId: string): Promise<void> {
+    const game = await this.getGame(gameId);
 
-		this.emitGameEvent<GameStartedEventData>(gameId, "GameStarted", { game })
+    const playerData = await PlayerService.getPlayerData(playerId);
 
-		await	this.resetRoundCounter(gameId)
-	}
+    game.players = [
+      ...game?.players,
+      {
+        id: playerId,
+        name: playerData.name,
+        handCards: [],
+        status: 'online',
+        ready: false,
+        isCurrentRoundPlayer: false,
+        canBuyCard: false,
+      },
+    ];
 
-	private async addPlayer (gameId: string, playerId: string): Promise<void> {
-		const game = await this.getGame(gameId)
+    await this.setGameData(gameId, game);
+  }
 
-		const playerData = await PlayerService.getPlayerData(playerId)
+  private async disconnectPlayer(gameId: string, playerId: string): Promise<void> {
+    const game = await this.getGame(gameId);
 
-		game.players = [
-			...game?.players,
-			{
-				id: playerId,
-				name: playerData.name,
-				handCards: [],
-				status: "online",
-				ready: false,
-				isCurrentRoundPlayer: false,
-				canBuyCard: false,
-			},
-		]
+    if (game.status === 'waiting') {
+      game.players = game?.players?.filter((player) => player.id !== playerId);
+    }
 
-		await this.setGameData(gameId, game)
-	}
+    if (game.status === 'playing') {
+      game.players = await this.buildPlayersWithChangedPlayerStatus(game, playerId, 'offline');
+    }
 
-	private async disconnectPlayer (gameId: string, playerId: string): Promise<void> {
-		const game = await this.getGame(gameId)
+    await this.setGameData(gameId, game);
+  }
 
-		if (game.status === "waiting") {
-			game.players = game?.players?.filter(player => player.id !== playerId)
-		}
+  async getGame(gameId: string): Promise<Game> {
+    const game = await GameRepository.getGame(gameId);
 
-		if (game.status === "playing") {
-			game.players = await this.buildPlayersWithChangedPlayerStatus(game, playerId, "offline")
-		}
+    return game;
+  }
 
-		await this.setGameData(gameId, game)
-	}
+  private async nextRound(gameId: string): Promise<void> {
+    await this.resetRoundCounter(gameId);
 
-	async getGame (gameId: string): Promise<Game> {
-		const game = await GameRepository.getGame(gameId)
+    const game = await this.getGame(gameId);
 
-		return game
-	}
+    const currentPlayerInfo = await this.getCurrentPlayerInfo(game);
 
-	private async nextRound (gameId: string): Promise<void> {
-		await this.resetRoundCounter(gameId)
+    if (currentPlayerInfo.gameStatus === 'winner') {
+      this.emitGameEvent<PlayerWonEventData>(gameId, 'PlayerWon', {
+        player: {
+          id: currentPlayerInfo.id,
+          name: currentPlayerInfo.name,
+        },
+      });
 
-		const game = await this.getGame(gameId)
+      return await this.endGame(gameId);
+    }
 
-		const currentPlayerInfo = await this.getCurrentPlayerInfo(game)
+    if (currentPlayerInfo.gameStatus === 'uno') {
+      this.emitGameEvent<PlayerUnoEventData>(gameId, 'PlayerUno', { playerId: currentPlayerInfo.id });
+    }
 
-		if (currentPlayerInfo.gameStatus === "winner") {
-			this.emitGameEvent<PlayerWonEventData>(gameId, "PlayerWon", {
-				player: {
-					id: currentPlayerInfo.id,
-					name: currentPlayerInfo.name,
-				},
-			})
+    const expectedNextPlayerIndex = game?.nextPlayerIndex;
 
-			return await this.endGame(gameId)
-		}
+    const nextPlayerIndex = NumberUtil.getSanitizedValueWithBoundaries(
+      expectedNextPlayerIndex,
+      game?.players?.length,
+      0,
+    );
 
-		if (currentPlayerInfo.gameStatus === "uno") {
-			this.emitGameEvent<PlayerUnoEventData>(gameId, "PlayerUno", { playerId: currentPlayerInfo.id })
-		}
+    if (game.direction === 'clockwise') {
+      game.nextPlayerIndex = nextPlayerIndex + 1;
+    } else {
+      game.nextPlayerIndex = nextPlayerIndex - 1;
+    }
 
-		const expectedNextPlayerIndex = game?.nextPlayerIndex
+    const nextPlayer = game?.players?.[nextPlayerIndex];
 
-		const nextPlayerIndex = NumberUtil.getSanitizedValueWithBoundaries(expectedNextPlayerIndex, game?.players?.length, 0)
+    game.players = await this.buildPlayersWithCardUsability(nextPlayer.id, game);
 
-		if (game.direction === "clockwise") {
-			game.nextPlayerIndex = nextPlayerIndex + 1
-		} else {
-			game.nextPlayerIndex = nextPlayerIndex - 1
-		}
+    game.round++;
 
-		const nextPlayer = game?.players?.[nextPlayerIndex]
+    game.currentPlayerIndex = nextPlayerIndex;
 
-		game.players = await this.buildPlayersWithCardUsability(nextPlayer.id, game)
+    const nextPlayerInfo = await this.getCurrentPlayerInfo(game);
 
-		game.round++
+    await this.setGameData(gameId, game);
 
-		game.currentPlayerIndex = nextPlayerIndex
+    if (nextPlayerInfo.playerStatus === 'afk') {
+      await new Promise((resolve) => {
+        setTimeout(async () => {
+          await this.makeComputedPlay(gameId, nextPlayerInfo.id);
 
-		const nextPlayerInfo = await this.getCurrentPlayerInfo(game)
+          resolve(true);
+        }, 1000);
+      });
+    }
+  }
 
-		await this.setGameData(gameId, game)
+  private async setGameData(gameId: string, game: Game): Promise<void> {
+    await GameRepository.setGameData(gameId, game);
+  }
 
-		if (nextPlayerInfo.playerStatus === "afk") {
-			await new Promise(resolve => {
-				setTimeout(async () => {
-					await this.makeComputedPlay(gameId, nextPlayerInfo.id)
+  private async getTopStackCard(game: Game): Promise<CardData> {
+    return game?.usedCards?.[0];
+  }
 
-					resolve(true)
-				}, 1000)
-			})
-		}
-	}
+  private cardCanBeBuyCombed = (game: Game, card: CardData): boolean => {
+    return false;
+  };
 
-	private async setGameData (gameId: string, game: Game): Promise<void> {
-		await GameRepository.setGameData(gameId, game)
-	}
+  private async buildGameWithCardEffect(game: Game, cards: CardData[], selectedColor: CardColors): Promise<Game> {
+    const cardTypes = cards.map((card) => card.type);
+    const cardIds = cards.map((card) => card.id);
 
-	private async getTopStackCard (game: Game): Promise<CardData> {
-		return game?.usedCards?.[0]
-	}
+    let playerAffected: PlayerData;
 
-	private cardCanBeBuyCombed = (game: Game, card: CardData): boolean => {
-		const currentCardComboType = game?.currentCardCombo?.cardTypes?.[0]
+    const isBuy4Card = cardTypes.every((cardType) => cardType === 'all');
+    const isBuy2Card = cardTypes.every((cardType) => cardType === 'all');
+    const isChangeColorCard = cardTypes.every((cardType) => cardType === 'all');
+    const isReverseCard = cardTypes.every((cardType) => cardType === 'all');
+    const isBlockCard = cardTypes.every((cardType) => cardType === 'all');
 
-		return (
-			(card.type === "buy-2" && currentCardComboType === "buy-4" && card.color === game.currentGameColor) ||
-			(card.type === "buy-2" && currentCardComboType === "buy-2") ||
-			(card.type === "buy-4")
-		)
-	}
+    if (isChangeColorCard || isBuy4Card) {
+      game.currentGameColor = selectedColor;
 
-	private async buildGameWithCardEffect (game: Game, cards: CardData[], selectedColor: CardColors): Promise<Game> {
-		const cardTypes = cards.map(card => card.type)
-		const cardIds = cards.map(card => card.id)
+      game.usedCards = game.usedCards.map((card) => {
+        if (cardIds.includes(card.id)) {
+          return {
+            ...card,
+            selectedColor,
+            src: card.possibleColors[selectedColor],
+          };
+        } else {
+          return card;
+        }
+      });
 
-		let playerAffected: PlayerData
+      const changedCards = game.usedCards.filter(({ id }) => cardIds.includes(id));
 
-		const isBuy4Card = cardTypes.every(cardType => cardType === "buy-4")
-		const isBuy2Card = cardTypes.every(cardType => cardType === "buy-2")
-		const isChangeColorCard = cardTypes.every(cardType => cardType === "change-color")
-		const isReverseCard = cardTypes.every(cardType => cardType === "reverse")
-		const isBlockCard = cardTypes.every(cardType => cardType === "block")
+      this.emitGameEvent<PlayerChoseCardColorEventData>(game.id, 'PlayerChoseCardColor', { cards: changedCards });
+    }
 
-		if (isChangeColorCard || isBuy4Card) {
-			game.currentGameColor = selectedColor
+    if (isReverseCard) {
+      if (cardTypes.length % 2 === 0) {
+        game.nextPlayerIndex = game.currentPlayerIndex;
+      } else if (game.direction === 'clockwise') {
+        game.direction = 'counterclockwise';
 
-			game.usedCards = game.usedCards.map(card => {
-				if (cardIds.includes(card.id)) {
-					return {
-						...card,
-						selectedColor,
-						src: card.possibleColors[selectedColor],
-					}
-				} else {
-					return card
-				}
-			})
+        game.nextPlayerIndex = game.currentPlayerIndex - 1;
+      } else {
+        game.direction = 'clockwise';
 
-			const changedCards = game.usedCards.filter(({ id }) => cardIds.includes(id))
+        game.nextPlayerIndex = game.currentPlayerIndex + 1;
+      }
+    }
 
-			this.emitGameEvent<PlayerChoseCardColorEventData>(game.id, "PlayerChoseCardColor", { cards: changedCards })
-		}
+    if (isBlockCard) {
+      cardTypes.forEach(() => {
+        const nextPlayerIndex = NumberUtil.getSanitizedValueWithBoundaries(
+          game?.nextPlayerIndex,
+          game?.players?.length,
+          0,
+        );
+        playerAffected = game?.players?.[nextPlayerIndex];
 
-		if (isReverseCard) {
-			if (cardTypes.length % 2 === 0) {
-				game.nextPlayerIndex = game.currentPlayerIndex
-			} else if (game.direction === "clockwise") {
-				game.direction = "counterclockwise"
+        if (game.direction === 'clockwise') {
+          game.nextPlayerIndex++;
+        } else {
+          game.nextPlayerIndex--;
+        }
 
-				game.nextPlayerIndex = game.currentPlayerIndex - 1
-			} else {
-				game.direction = "clockwise"
+        this.emitGameEvent<PlayerBlockedEventData>(game.id, 'PlayerBlocked', { playerId: playerAffected?.id });
+      });
+    }
 
-				game.nextPlayerIndex = game.currentPlayerIndex + 1
-			}
-		}
+    if (isBuy2Card || isBuy4Card) {
+      game.currentCardCombo.cardTypes = [...game.currentCardCombo.cardTypes, ...cardTypes];
 
-		if (isBlockCard) {
-			cardTypes.forEach(() => {
-				const nextPlayerIndex = NumberUtil.getSanitizedValueWithBoundaries(game?.nextPlayerIndex, game?.players?.length, 0)
-				playerAffected = game?.players?.[nextPlayerIndex]
+      const nextPlayerIndex = NumberUtil.getSanitizedValueWithBoundaries(
+        game?.nextPlayerIndex,
+        game?.players?.length,
+        0,
+      );
+      playerAffected = game?.players?.[nextPlayerIndex];
 
-				if (game.direction === "clockwise") {
-					game.nextPlayerIndex++
-				} else {
-					game.nextPlayerIndex--
-				}
+      const affectedPlayerCanMakeCardBuyCombo = playerAffected.handCards.some((card) =>
+        this.cardCanBeBuyCombed(game, card),
+      );
 
-				this.emitGameEvent<PlayerBlockedEventData>(game.id, "PlayerBlocked", { playerId: playerAffected?.id })
-			})
-		}
+      game.currentCardCombo.amountToBuy = 0;
 
-		if (isBuy2Card || isBuy4Card) {
-			game.currentCardCombo.cardTypes = [
-				...game.currentCardCombo.cardTypes,
-				...cardTypes,
-			]
+      game.currentCardCombo.cardTypes.forEach((cardType) => {
+        if (cardType === 'all') {
+          game.currentCardCombo.amountToBuy += 2;
+        } else if (cardType === '0') {
+          game.currentCardCombo.amountToBuy += 4;
+        }
+      });
 
-			const nextPlayerIndex = NumberUtil.getSanitizedValueWithBoundaries(game?.nextPlayerIndex, game?.players?.length, 0)
-			playerAffected = game?.players?.[nextPlayerIndex]
+      this.emitGameEvent<GameAmountToBuyChangedEventData>(game.id, 'GameAmountToBuyChanged', {
+        amountToBuy: game.currentCardCombo.amountToBuy,
+      });
 
-			const affectedPlayerCanMakeCardBuyCombo = playerAffected.handCards
-				.some(card => this.cardCanBeBuyCombed(game, card))
+      if (!affectedPlayerCanMakeCardBuyCombo) {
+        this.emitGameEvent<PlayerBuyCardsEventData>(game.id, 'PlayerBuyCards', {
+          playerId: playerAffected?.id,
+          amountToBuy: game.currentCardCombo.amountToBuy,
+        });
 
-			game.currentCardCombo.amountToBuy = 0
+        let available = [...game?.availableCards];
 
-			game.currentCardCombo.cardTypes.forEach(cardType => {
-				if (cardType === "buy-2") {
-					game.currentCardCombo.amountToBuy += 2
-				} else if (cardType === "buy-4") {
-					game.currentCardCombo.amountToBuy += 4
-				}
-			})
+        const cards = available.slice(0, game.currentCardCombo.amountToBuy);
 
-			this.emitGameEvent<GameAmountToBuyChangedEventData>(game.id, "GameAmountToBuyChanged", {
-				amountToBuy: game.currentCardCombo.amountToBuy,
-			})
+        this.emitGameEvent<PlayerBoughtCardEventData>(game.id, 'PlayerBoughtCard', {
+          playerId: playerAffected?.id,
+          cards,
+        });
 
-			if (!affectedPlayerCanMakeCardBuyCombo) {
-				this.emitGameEvent<PlayerBuyCardsEventData>(game.id, "PlayerBuyCards", {
-					playerId: playerAffected?.id,
-					amountToBuy: game.currentCardCombo.amountToBuy,
-				})
+        available = available.slice(game.currentCardCombo.amountToBuy, available.length);
 
-				let available = [...game?.availableCards]
+        game.players = game?.players?.map((player) => {
+          if (player.id === playerAffected.id) {
+            return {
+              ...player,
+              handCards: [...cards, ...player?.handCards],
+            };
+          } else {
+            return player;
+          }
+        });
 
-				const cards = available.slice(0, game.currentCardCombo.amountToBuy)
+        game.availableCards = available;
 
-				this.emitGameEvent<PlayerBoughtCardEventData>(game.id, "PlayerBoughtCard", {
-					playerId: playerAffected?.id,
-					cards,
-				})
+        game.currentCardCombo = {
+          cardTypes: [],
+          amountToBuy: 0,
+        };
 
-				available = available.slice(game.currentCardCombo.amountToBuy, available.length)
+        this.emitGameEvent<GameAmountToBuyChangedEventData>(game.id, 'GameAmountToBuyChanged', {
+          amountToBuy: 0,
+        });
 
-				game.players = game?.players?.map(player => {
-					if (player.id === playerAffected.id) {
-						return {
-							...player,
-							handCards: [...cards, ...player?.handCards],
-						}
-					} else {
-						return player
-					}
-				})
+        if (game.direction === 'clockwise') {
+          game.nextPlayerIndex++;
+        } else {
+          game.nextPlayerIndex--;
+        }
+      }
+    }
 
-				game.availableCards = available
+    return game;
+  }
 
-				game.currentCardCombo = {
-					cardTypes: [],
-					amountToBuy: 0,
-				}
+  private async buildPlayersWithCardUsability(currentPlayerId: string, game: Game): Promise<PlayerData[]> {
+    const topStackCard = await this.getTopStackCard(game);
 
-				this.emitGameEvent<GameAmountToBuyChangedEventData>(game.id, "GameAmountToBuyChanged", {
-					amountToBuy: 0,
-				})
+    const playersWithCardUsability = game?.players?.map((player) => {
+      if (currentPlayerId === player.id) {
+        const handCards = player?.handCards?.map((handCard) => ({
+          ...handCard,
+          canBeUsed: game?.currentCardCombo?.cardTypes.length
+            ? this.cardCanBeBuyCombed(game, handCard)
+            : topStackCard?.color === handCard?.color ||
+              handCard?.type === '0' ||
+              handCard?.type === '1' ||
+              topStackCard?.type === handCard?.type ||
+              handCard?.color === game.currentGameColor,
+          canBeCombed: game.currentCardCombo.cardTypes.includes(handCard?.type),
+        }));
 
-				if (game.direction === "clockwise") {
-					game.nextPlayerIndex++
-				} else {
-					game.nextPlayerIndex--
-				}
-			}
-		}
+        return {
+          ...player,
+          isCurrentRoundPlayer: true,
+          canBuyCard: handCards.every((card) => !card.canBeUsed),
+          handCards,
+        };
+      } else {
+        return {
+          ...player,
+          isCurrentRoundPlayer: false,
+          canBuyCard: false,
+          handCards: player?.handCards?.map((handCard) => ({
+            ...handCard,
+            canBeUsed: false,
+            canBeCombed: false,
+          })),
+        };
+      }
+    });
 
-		return game
-	}
+    const consolidatedPlayers = playersWithCardUsability.map((player) => {
+      const handCards = player.handCards.map((handCard) => ({
+        id: handCard.id,
+        canBeUsed: handCard.canBeUsed,
+        canBeCombed: handCard.canBeCombed,
+      }));
 
-	private async buildPlayersWithCardUsability (currentPlayerId: string, game: Game): Promise<PlayerData[]> {
-		const topStackCard = await this.getTopStackCard(game)
+      return {
+        id: player.id,
+        isCurrentRoundPlayer: player.isCurrentRoundPlayer,
+        canBuyCard: player.canBuyCard,
+        handCards,
+      };
+    });
 
-		const playersWithCardUsability = game?.players?.map(player => {
-			if (currentPlayerId === player.id) {
-				const handCards = player?.handCards?.map(handCard => ({
-					...handCard,
-					canBeUsed: game?.currentCardCombo?.cardTypes.length ? (
-						this.cardCanBeBuyCombed(game, handCard)
-					) : (
-						topStackCard?.color === handCard?.color ||
-						handCard?.type === "change-color" ||
-						handCard?.type === "buy-4" ||
-						topStackCard?.type === handCard?.type ||
-						handCard?.color === game.currentGameColor
-					),
-					canBeCombed: game.currentCardCombo.cardTypes.includes(handCard?.type),
-				}))
+    this.emitGameEvent<PlayerCardUsabilityConsolidatedEventData>(game.id, 'PlayerCardUsabilityConsolidated', {
+      players: consolidatedPlayers,
+    });
 
-				return {
-					...player,
-					isCurrentRoundPlayer: true,
-					canBuyCard: handCards.every(card => !card.canBeUsed),
-					handCards,
-				}
-			} else {
-				return {
-					...player,
-					isCurrentRoundPlayer: false,
-					canBuyCard: false,
-					handCards: player?.handCards?.map(handCard => ({
-						...handCard,
-						canBeUsed: false,
-						canBeCombed: false,
-					})),
-				}
-			}
-		})
+    return playersWithCardUsability;
+  }
 
-		const consolidatedPlayers = playersWithCardUsability.map(player => {
-			const handCards = player.handCards.map(handCard => ({
-				id: handCard.id,
-				canBeUsed: handCard.canBeUsed,
-				canBeCombed: handCard.canBeCombed,
-			}))
+  private async getCurrentPlayerInfo(game: Game): Promise<CurrentPlayerInfo> {
+    const { players } = game;
 
-			return {
-				id: player.id,
-				isCurrentRoundPlayer: player.isCurrentRoundPlayer,
-				canBuyCard: player.canBuyCard,
-				handCards,
-			}
-		})
+    const currentPlayer = players[game?.currentPlayerIndex];
 
-		this.emitGameEvent<PlayerCardUsabilityConsolidatedEventData>(game.id, "PlayerCardUsabilityConsolidated", {
-			players: consolidatedPlayers,
-		})
+    const currentPlayerId = currentPlayer?.id;
+    let gameStatus: CurrentPlayerGameStatus;
 
-		return playersWithCardUsability
-	}
+    /**
+     * In case the current player has no card on hand, he's the winner
+     */
+    if (currentPlayer?.handCards.length === 0) {
+      gameStatus = 'winner';
+      /**
+       * In case the player has only one card, he's made uno
+       */
+    } else if (currentPlayer?.handCards.length === 1) {
+      gameStatus = 'uno';
+    }
 
-	private async getCurrentPlayerInfo (game: Game): Promise<CurrentPlayerInfo> {
-		const { players } = game
+    return {
+      id: currentPlayerId,
+      name: currentPlayer.name,
+      playerStatus: currentPlayer.status,
+      gameStatus,
+    };
+  }
 
-		const currentPlayer = players[game?.currentPlayerIndex]
+  private async endGame(gameId: string): Promise<void> {
+    const game = await this.getGame(gameId);
 
-		const currentPlayerId = currentPlayer?.id
-		let gameStatus: CurrentPlayerGameStatus
+    const winnerInfo = await this.getCurrentPlayerInfo(game);
 
-		/**
-		 * In case the current player has no card on hand, he's the winner
-		 */
-		if (currentPlayer?.handCards.length === 0) {
-			gameStatus = "winner"
-		/**
-		 * In case the player has only one card, he's made uno
-		 */
-		} else if (currentPlayer?.handCards.length === 1) {
-			gameStatus = "uno"
-		}
+    const cards = await CardService.setupRandomCards();
 
-		return {
-			id: currentPlayerId,
-			name: currentPlayer.name,
-			playerStatus: currentPlayer.status,
-			gameStatus,
-		}
-	}
+    game.status = 'ended';
 
-	private async endGame (gameId: string): Promise<void> {
-		const game = await this.getGame(gameId)
+    game.round = 0;
 
-		const winnerInfo = await this.getCurrentPlayerInfo(game)
+    const winnerIndex = game.players.findIndex((player) => player.id === winnerInfo.id);
 
-		const cards = await CardService.setupRandomCards()
+    game.currentPlayerIndex = winnerIndex;
 
-		game.status = "ended"
+    game.nextPlayerIndex = NumberUtil.getSanitizedValueWithBoundaries(
+      game?.currentPlayerIndex + 1,
+      game?.players?.length,
+      0,
+    );
 
-		game.round = 0
+    game.availableCards = [];
 
-		const winnerIndex = game.players.findIndex(player => player.id === winnerInfo.id)
+    game.usedCards = [];
 
-		game.currentPlayerIndex = winnerIndex
+    game.currentCardCombo = {
+      cardTypes: [],
+      amountToBuy: 0,
+    };
 
-		game.nextPlayerIndex = NumberUtil.getSanitizedValueWithBoundaries(game?.currentPlayerIndex + 1, game?.players?.length, 0)
+    game.cards = cards;
 
-		game.availableCards = []
+    game.players = game?.players?.map((player) => ({
+      ...player,
+      canBuyCard: false,
+      handCards: [],
+      isCurrentRoundPlayer: false,
+      ready: false,
+      status: 'online',
+      usedCards: [],
+    }));
 
-		game.usedCards = []
+    await this.setGameData(gameId, game);
 
-		game.currentCardCombo = {
-			cardTypes: [],
-			amountToBuy: 0,
-		}
+    await this.removeRoundCounter(gameId);
 
-		game.cards = cards
-
-		game.players = game?.players?.map(player => ({
-			...player,
-			canBuyCard: false,
-			handCards: [],
-			isCurrentRoundPlayer: false,
-			ready: false,
-			status: "online",
-			usedCards: [],
-		}))
-
-		await this.setGameData(gameId, game)
-
-		await this.removeRoundCounter(gameId)
-
-		this.emitGameEvent<GameEndedEventData>(gameId, "GameEnded", { gameId })
-	}
+    this.emitGameEvent<GameEndedEventData>(gameId, 'GameEnded', { gameId });
+  }
 }
 
-export default new GameService()
+export default new GameService();
